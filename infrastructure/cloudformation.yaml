@@ -1,0 +1,411 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Infrastructure Agent — Full deployment stack.
+  Deploys the conversational provisioning agent (Strands Agents SDK on
+  Amazon Bedrock AgentCore Runtime) with all supporting infrastructure:
+  DynamoDB session table, ECR repository, S3 code bucket, IAM roles,
+  CloudWatch observability, and VPC networking.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, production]
+    Description: Deployment environment
+
+  BedrockModelId:
+    Type: String
+    Default: us.anthropic.claude-sonnet-4-6
+    Description: Bedrock model ID for agent inference
+
+  JiraBaseUrl:
+    Type: String
+    Default: ''
+    Description: JIRA REST API base URL (e.g., https://your-org.atlassian.net)
+
+  AwxBaseUrl:
+    Type: String
+    Default: ''
+    Description: AWX/Ansible Tower API base URL
+
+  VpcCidr:
+    Type: String
+    Default: '10.10.0.0/16'
+    Description: VPC CIDR block for the agent infrastructure
+
+  SubnetACidr:
+    Type: String
+    Default: '10.10.1.0/24'
+
+  SubnetBCidr:
+    Type: String
+    Default: '10.10.2.0/24'
+
+Resources:
+
+  # ─────────────────── Networking ───────────────────
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub 'infra-agent-${Environment}'
+        - Key: Project
+          Value: infrastructure-agent
+
+  SubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref SubnetACidr
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub 'infra-agent-private-a-${Environment}'
+
+  SubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref SubnetBCidr
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub 'infra-agent-private-b-${Environment}'
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub 'infra-agent-igw-${Environment}'
+
+  IGWAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  NatEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEIP.AllocationId
+      SubnetId: !Ref SubnetA
+      Tags:
+        - Key: Name
+          Value: !Sub 'infra-agent-nat-${Environment}'
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub 'infra-agent-private-rt-${Environment}'
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: '0.0.0.0/0'
+      NatGatewayId: !Ref NatGateway
+
+  SubnetARouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetA
+      RouteTableId: !Ref PrivateRouteTable
+
+  SubnetBRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetB
+      RouteTableId: !Ref PrivateRouteTable
+
+  AgentSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Infrastructure Agent runtime security group
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref VpcCidr
+          Description: HTTPS from within the VPC to the agent runtime
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: '0.0.0.0/0'
+          Description: HTTPS egress for Bedrock, JIRA, and AWX API calls
+      Tags:
+        - Key: Name
+          Value: !Sub 'infra-agent-sg-${Environment}'
+
+  # ─────────────────── DynamoDB Session Table ───────────────────
+  SessionTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    Properties:
+      TableName: !Sub 'infrastructure-agent-sessions-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: session_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: session_id
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Project
+          Value: infrastructure-agent
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ─────────────────── ECR Repository ───────────────────
+  ECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub 'infra-provisioning-agent-${Environment}'
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: IMMUTABLE
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [{
+              "rulePriority": 1,
+              "description": "Keep last 10 images",
+              "selection": {"tagStatus": "any", "countType": "imageCountMoreThan", "countNumber": 10},
+              "action": {"type": "expire"}
+            }]
+          }
+      Tags:
+        - Key: Project
+          Value: infrastructure-agent
+
+  # ─────────────────── S3 Code Bucket ───────────────────
+  CodeBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Sub 'infra-agent-code-${AWS::AccountId}-${AWS::Region}-${Environment}'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: infrastructure-agent
+
+  # ─────────────────── IAM: AgentCore Execution Role ───────────────────
+  AgentCoreExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'infra-agent-agentcore-exec-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - bedrock.amazonaws.com
+                - bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: BedrockInvoke
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                  - bedrock:GetInferenceProfile
+                  - bedrock:ListInferenceProfiles
+                Resource: '*'
+        - PolicyName: DynamoDBSessions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Scan
+                Resource: !GetAtt SessionTable.Arn
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/vendedlogs/bedrock-agentcore/*'
+        - PolicyName: ECRPull
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:GetAuthorizationToken
+                Resource: '*'
+        - PolicyName: S3CodeAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt CodeBucket.Arn
+                  - !Sub '${CodeBucket.Arn}/*'
+      Tags:
+        - Key: Project
+          Value: infrastructure-agent
+
+  # ─────────────────── IAM: CodeBuild Role ───────────────────
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'infra-agent-codebuild-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodeBuildPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:PutImage
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt CodeBucket.Arn
+                  - !Sub '${CodeBucket.Arn}/*'
+      Tags:
+        - Key: Project
+          Value: infrastructure-agent
+
+  # ─────────────────── CloudWatch Observability ───────────────────
+  AgentLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: !Sub '/infrastructure-agent/${Environment}'
+      RetentionInDays: 90
+      Tags:
+        - Key: Project
+          Value: infrastructure-agent
+
+Outputs:
+  VpcId:
+    Value: !Ref VPC
+    Export:
+      Name: !Sub '${AWS::StackName}-VpcId'
+
+  SubnetIds:
+    Value: !Join [',', [!Ref SubnetA, !Ref SubnetB]]
+    Export:
+      Name: !Sub '${AWS::StackName}-SubnetIds'
+
+  SecurityGroupId:
+    Value: !Ref AgentSecurityGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-SecurityGroupId'
+
+  SessionTableName:
+    Value: !Ref SessionTable
+
+  SessionTableArn:
+    Value: !GetAtt SessionTable.Arn
+
+  ECRRepositoryUrl:
+    Value: !GetAtt ECRRepository.RepositoryUri
+
+  CodeBucketName:
+    Value: !Ref CodeBucket
+
+  AgentCoreExecutionRoleArn:
+    Value: !GetAtt AgentCoreExecutionRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ExecutionRoleArn'
+
+  CodeBuildRoleArn:
+    Value: !GetAtt CodeBuildRole.Arn
+
+  AgentCoreDeployCommand:
+    Value: !Sub |
+      agentcore configure -c \
+        --name infra_provisioning_agent \
+        --entrypoint agentcore_handler.py \
+        --region ${AWS::Region} \
+        --execution-role ${AgentCoreExecutionRole.Arn} \
+        --ecr ${ECRRepository.RepositoryUri} \
+        --s3 s3://${CodeBucket} \
+        --non-interactive
+
+      agentcore deploy \
+        --agent infra_provisioning_agent \
+        --env "AWS_REGION=${AWS::Region}" \
+        --env "BEDROCK_MODEL_ID=${BedrockModelId}" \
+        --env "DYNAMODB_TABLE_NAME=${SessionTable}" \
+        --env "DYNAMODB_REGION=${AWS::Region}" \
+        --env "JIRA_BASE_URL=${JiraBaseUrl}" \
+        --env "AWX_BASE_URL=${AwxBaseUrl}" \
+        --auto-update-on-conflict

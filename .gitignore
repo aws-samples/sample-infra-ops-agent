@@ -1,0 +1,36 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+
+# Secrets & local config
+.env
+*.pem
+*.key
+
+# AgentCore local state (contains account IDs, ARNs)
+.bedrock_agentcore.yaml
+.bedrock_agentcore/
+
+# Terraform state (contains resource IDs, potentially sensitive)
+infrastructure/.terraform/
+infrastructure/terraform.tfstate*
+infrastructure/.terraform.lock.hcl
+
+# Review / scan artifacts
+scan-report*.json
+bandit-report*.json
+pip-audit*.json
+
+# Agent / editor local state
+.claude/
+
+# OS
+.DS_Store
+
+# Temp
+/tmp/

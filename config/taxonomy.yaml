@@ -1,0 +1,62 @@
+# Provisioning taxonomy — defines valid values for infrastructure requests.
+# The agents validate inputs against these categories.
+
+compute:
+  instance_types:
+    - t3.micro
+    - t3.small
+    - t3.medium
+    - t3.large
+    - m5.large
+    - m5.xlarge
+    - m5.2xlarge
+    - c5.large
+    - c5.xlarge
+    - r5.large
+    - r5.xlarge
+  operating_systems:
+    - Amazon Linux 2023
+    - Ubuntu 22.04
+    - Ubuntu 24.04
+    - Windows Server 2022
+    - Red Hat Enterprise Linux 9
+  environments:
+    - development
+    - staging
+    - production
+
+networking:
+  vpcs:
+    - vpc-core-dev
+    - vpc-core-staging
+    - vpc-core-prod
+  subnets:
+    - subnet-private-a
+    - subnet-private-b
+    - subnet-public-a
+  security_group_templates:
+    - web-server
+    - app-server
+    - database
+
+storage:
+  volume_types:
+    - gp3
+    - io2
+    - st1
+  sizes_gb:
+    min: 20
+    max: 16384
+
+naming:
+  pattern: "{env}-{project}-{role}-{seq:03d}"
+  max_length: 63
+
+compliance:
+  required_tags:
+    - project
+    - environment
+    - owner
+    - cost-center
+  backup_policy_required: true
+  encryption_at_rest_required: true
