@@ -225,13 +225,6 @@ authentication (Amazon Cognito / ALB OIDC), tuning guardrail and WAF rules,
 wiring the approval gate to your human control, and re-confirming the
 foundation model against your organization's pre-approved LLM list.
 
-## AWS service naming
-
-On first mention this README uses full AWS service names — Amazon Bedrock
-AgentCore, Amazon Elastic Compute Cloud (Amazon EC2), Amazon DynamoDB, Amazon
-Elastic Container Service (Amazon ECS), AWS Fargate, and Amazon CloudWatch —
-per AWS style guidance.
-
 ## Legal disclaimer
 
 This is sample code, for non-production usage. You should work with your
